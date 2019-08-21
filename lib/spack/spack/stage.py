@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
-import grp
 import os
 import stat
 import sys
@@ -56,8 +55,8 @@ def _first_accessible_path(paths):
                     if not os.path.exists(prefix):
                         break
                 parent = os.path.dirname(prefix)
-                group = grp.getgrgid(os.stat(parent).st_gid)[0]
-                mkdirp(path, group=group, default_perms='parents')
+                gid = os.stat(parent).st_gid
+                mkdirp(path, group=gid, default_perms='parents')
 
                 if can_access(path):
                     return path
@@ -438,10 +437,8 @@ class Stage(object):
         """
         # Emulate file permissions for tempfile.mkdtemp.
         if not os.path.exists(self.path):
-            print("TLD: %s does not exist, creating it" % self.path)
             mkdirp(self.path, mode=stat.S_IRWXU)
         elif not os.path.isdir(self.path):
-            print("TLD: %s is not a directory, replacing it" % self.path)
             os.remove(self.path)
             mkdirp(self.path, mode=stat.S_IRWXU)
 
