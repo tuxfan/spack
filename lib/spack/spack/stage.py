@@ -12,7 +12,6 @@ import tempfile
 import getpass
 from six import string_types
 from six import iteritems
-from six.moves.urllib.parse import urljoin
 
 import llnl.util.tty as tty
 from llnl.util.filesystem import mkdirp, can_access, install, install_tree
@@ -20,12 +19,16 @@ from llnl.util.filesystem import partition_path, remove_linked_tree
 
 import spack.paths
 import spack.caches
+import spack.cmd
 import spack.config
 import spack.error
+import spack.mirror
 import spack.util.lock
 import spack.fetch_strategy as fs
 import spack.util.pattern as pattern
 import spack.util.path as sup
+import spack.util.url as url_util
+
 from spack.util.crypto import prefix_bits, bit_length
 
 
@@ -163,6 +166,14 @@ def get_stage_root():
     return _stage_root
 
 
+def _mirror_roots():
+    mirrors = spack.config.get('mirrors')
+    return [
+        sup.substitute_path_variables(root) if root.endswith(os.sep)
+        else sup.substitute_path_variables(root) + os.sep
+        for root in mirrors.values()]
+
+
 class Stage(object):
     """Manages a temporary stage directory for building.
 
@@ -213,7 +224,7 @@ class Stage(object):
 
     def __init__(
             self, url_or_fetch_strategy,
-            name=None, mirror_path=None, keep=False, path=None, lock=True,
+            name=None, mirror_paths=None, keep=False, path=None, lock=True,
             search_fn=None):
         """Create a stage object.
            Parameters:
@@ -227,10 +238,10 @@ class Stage(object):
                  stage object later).  If name is not provided, then this
                  stage will be given a unique name automatically.
 
-             mirror_path
+             mirror_paths
                  If provided, Stage will search Spack's mirrors for
-                 this archive at the mirror_path, before using the
-                 default fetch strategy.
+                 this archive at each of the provided relative mirror paths
+                 before using the default fetch strategy.
 
              keep
                  By default, when used as a context manager, the Stage
@@ -252,7 +263,7 @@ class Stage(object):
         # TODO: fetch/stage coupling needs to be reworked -- the logic
         # TODO: here is convoluted and not modular enough.
         if isinstance(url_or_fetch_strategy, string_types):
-            self.fetcher = fs.from_url(url_or_fetch_strategy)
+            self.fetcher = fs.from_url_scheme(url_or_fetch_strategy)
         elif isinstance(url_or_fetch_strategy, fs.FetchStrategy):
             self.fetcher = url_or_fetch_strategy
         else:
@@ -273,7 +284,7 @@ class Stage(object):
         self.name = name
         if name is None:
             self.name = stage_prefix + next(tempfile._get_candidate_names())
-        self.mirror_path = mirror_path
+        self.mirror_paths = mirror_paths
 
         # Use the provided path or construct an optionally named stage path.
         if path is not None:
@@ -347,8 +358,8 @@ class Stage(object):
             expanded = self.default_fetcher.expand_archive
             fnames.append(os.path.basename(self.default_fetcher.url))
 
-        if self.mirror_path:
-            fnames.append(os.path.basename(self.mirror_path))
+        if self.mirror_paths:
+            fnames.extend(os.path.basename(x) for x in self.mirror_paths)
 
         paths.extend(os.path.join(self.path, f) for f in fnames)
         if not expanded:
@@ -396,17 +407,14 @@ class Stage(object):
         # TODO: Or @alalazo may have some ideas about how to use a
         # TODO: CompositeFetchStrategy here.
         self.skip_checksum_for_mirror = True
-        if self.mirror_path:
-            mirrors = spack.config.get('mirrors')
-
+        if self.mirror_paths:
             # Join URLs of mirror roots with mirror paths. Because
             # urljoin() will strip everything past the final '/' in
             # the root, so we add a '/' if it is not present.
-            mir_roots = [
-                sup.substitute_path_variables(root) if root.endswith(os.sep)
-                else sup.substitute_path_variables(root) + os.sep
-                for root in mirrors.values()]
-            urls = [urljoin(root, self.mirror_path) for root in mir_roots]
+            urls = []
+            for mirror in spack.mirror.MirrorCollection().values():
+                for rel_path in self.mirror_paths:
+                    urls.append(url_util.join(mirror.fetch_url, rel_path))
 
             # If this archive is normally fetched from a tarball URL,
             # then use the same digest.  `spack mirror` ensures that
@@ -426,13 +434,15 @@ class Stage(object):
             # Add URL strategies for all the mirrors with the digest
             for url in urls:
                 fetchers.insert(
-                    0, fs.URLFetchStrategy(
+                    0, fs.from_url_scheme(
                         url, digest, expand=expand, extension=extension))
+
             if self.default_fetcher.cachable:
-                fetchers.insert(
-                    0, spack.caches.fetch_cache.fetcher(
-                        self.mirror_path, digest, expand=expand,
-                        extension=extension))
+                for rel_path in reversed(list(self.mirror_paths)):
+                    cache_fetcher = spack.caches.fetch_cache.fetcher(
+                        rel_path, digest, expand=expand,
+                        extension=extension)
+                    fetchers.insert(0, cache_fetcher)
 
         def generate_fetchers():
             for fetcher in fetchers:
@@ -477,10 +487,24 @@ class Stage(object):
             self.fetcher.check()
 
     def cache_local(self):
-        spack.caches.fetch_cache.store(self.fetcher, self.mirror_path)
+        spack.caches.fetch_cache.store(
+            self.fetcher, self.mirror_paths.storage_path)
 
-        if spack.caches.mirror_cache:
-            spack.caches.mirror_cache.store(self.fetcher, self.mirror_path)
+    def cache_mirror(self, stats):
+        """Perform a fetch if the resource is not already cached"""
+        dst_root = spack.caches.mirror_cache.root
+        absolute_storage_path = os.path.join(
+            dst_root, self.mirror_paths.storage_path)
+
+        if os.path.exists(absolute_storage_path):
+            stats.already_existed(absolute_storage_path)
+            return
+
+        self.fetch()
+        spack.caches.mirror_cache.store(
+            self.fetcher, self.mirror_paths.storage_path,
+            self.mirror_paths.cosmetic_path)
+        stats.added(absolute_storage_path)
 
     def expand_archive(self):
         """Changes to the stage directory and attempt to expand the downloaded
@@ -592,7 +616,7 @@ class ResourceStage(Stage):
 
 @pattern.composite(method_list=[
     'fetch', 'create', 'created', 'check', 'expand_archive', 'restage',
-    'destroy', 'cache_local', 'managed_by_spack'])
+    'destroy', 'cache_local', 'cache_mirror', 'managed_by_spack'])
 class StageComposite:
     """Composite for Stage type objects. The first item in this composite is
     considered to be the root package, and operations that return a value are
@@ -629,10 +653,6 @@ class StageComposite:
     @property
     def archive_file(self):
         return self[0].archive_file
-
-    @property
-    def mirror_path(self):
-        return self[0].mirror_path
 
 
 class DIYStage(object):
@@ -708,6 +728,91 @@ def purge():
                 remove_linked_tree(stage_path)
 
 
+def get_checksums_for_versions(
+        url_dict, name, first_stage_function=None, keep_stage=False):
+    """Fetches and checksums archives from URLs.
+
+    This function is called by both ``spack checksum`` and ``spack
+    create``.  The ``first_stage_function`` argument allows the caller to
+    inspect the first downloaded archive, e.g., to determine the build
+    system.
+
+    Args:
+        url_dict (dict): A dictionary of the form: version -> URL
+        name (str): The name of the package
+        first_stage_function (callable): function that takes a Stage and a URL;
+            this is run on the stage of the first URL downloaded
+        keep_stage (bool): whether to keep staging area when command completes
+
+    Returns:
+        (str): A multi-line string containing versions and corresponding hashes
+
+    """
+    sorted_versions = sorted(url_dict.keys(), reverse=True)
+
+    # Find length of longest string in the list for padding
+    max_len = max(len(str(v)) for v in sorted_versions)
+    num_ver = len(sorted_versions)
+
+    tty.msg("Found {0} version{1} of {2}:".format(
+            num_ver, '' if num_ver == 1 else 's', name),
+            "",
+            *spack.cmd.elide_list(
+                ["{0:{1}}  {2}".format(str(v), max_len, url_dict[v])
+                 for v in sorted_versions]))
+    tty.msg('')
+
+    archives_to_fetch = tty.get_number(
+        "How many would you like to checksum?", default=1, abort='q')
+
+    if not archives_to_fetch:
+        tty.die("Aborted.")
+
+    versions = sorted_versions[:archives_to_fetch]
+    urls = [url_dict[v] for v in versions]
+
+    tty.msg("Downloading...")
+    version_hashes = []
+    i = 0
+    for url, version in zip(urls, versions):
+        try:
+            with Stage(url, keep=keep_stage) as stage:
+                # Fetch the archive
+                stage.fetch()
+                if i == 0 and first_stage_function:
+                    # Only run first_stage_function the first time,
+                    # no need to run it every time
+                    first_stage_function(stage, url)
+
+                # Checksum the archive and add it to the list
+                version_hashes.append((version, spack.util.crypto.checksum(
+                    hashlib.sha256, stage.archive_file)))
+                i += 1
+        except FailedDownloadError:
+            tty.msg("Failed to fetch {0}".format(url))
+        except Exception as e:
+            tty.msg("Something failed on {0}, skipping.".format(url),
+                    "  ({0})".format(e))
+
+    if not version_hashes:
+        tty.die("Could not fetch any versions for {0}".format(name))
+
+    # Find length of longest string in the list for padding
+    max_len = max(len(str(v)) for v, h in version_hashes)
+
+    # Generate the version directives to put in a package.py
+    version_lines = "\n".join([
+        "    version('{0}', {1}sha256='{2}')".format(
+            v, ' ' * (max_len - len(str(v))), h) for v, h in version_hashes
+    ])
+
+    num_hash = len(version_hashes)
+    tty.msg("Checksummed {0} version{1} of {2}".format(
+        num_hash, '' if num_hash == 1 else 's', name))
+
+    return version_lines
+
+
 class StageError(spack.error.SpackError):
     """"Superclass for all errors encountered during staging."""
 
@@ -718,6 +823,10 @@ class StagePathError(StageError):
 
 class RestageError(StageError):
     """"Error encountered during restaging."""
+
+
+class VersionFetchError(StageError):
+    """Raised when we can't determine a URL to fetch a package."""
 
 
 # Keep this in namespace for convenience
