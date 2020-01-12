@@ -1,4 +1,4 @@
-# Copyright 2013-2019 Lawrence Livermore National Security, LLC and other
+# Copyright 2013-2020 Lawrence Livermore National Security, LLC and other
 # Spack Project Developers. See the top-level COPYRIGHT file for details.
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
@@ -28,6 +28,9 @@ class Icu4c(AutotoolsPackage):
             description='Use the specified C++ standard when building')
 
     depends_on('python', type='build', when='@64.1:')
+
+    conflicts('%intel@:16', when='@60.1:',
+              msg="Intel compilers have immature C++11 and multibyte support")
 
     configure_directory = 'source'
 

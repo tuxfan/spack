@@ -1,4 +1,4 @@
-# Copyright 2013-2019 Lawrence Livermore National Security, LLC and other
+# Copyright 2013-2020 Lawrence Livermore National Security, LLC and other
 # Spack Project Developers. See the top-level COPYRIGHT file for details.
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
@@ -28,7 +28,7 @@ level = "short"
 
 
 package_template = '''\
-# Copyright 2013-2019 Lawrence Livermore National Security, LLC and other
+# Copyright 2013-2020 Lawrence Livermore National Security, LLC and other
 # Spack Project Developers. See the top-level COPYRIGHT file for details.
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
@@ -59,6 +59,10 @@ class {class_name}({base_class_name}):
     # FIXME: Add a proper url for your package's homepage here.
     homepage = "https://www.example.com"
 {url_def}
+
+    # FIXME: Add a list of GitHub accounts to
+    # notify when the package is updated.
+    # maintainers = ['github_user1', 'github_user2']
 
 {versions}
 
@@ -242,6 +246,7 @@ class PythonPackageTemplate(PackageTemplate):
 
     dependencies = """\
     # FIXME: Add dependencies if required.
+    # depends_on('python@2.X:2.Y,3.Z:', type=('build', 'run'))
     # depends_on('py-setuptools', type='build')
     # depends_on('py-foo',        type=('build', 'run'))"""
 
@@ -422,7 +427,8 @@ def setup_parser(subparser):
         '-n', '--name',
         help="name of the package to create")
     subparser.add_argument(
-        '-t', '--template', metavar='TEMPLATE', choices=templates.keys(),
+        '-t', '--template', metavar='TEMPLATE',
+        choices=sorted(templates.keys()),
         help="build system template to use. options: %(choices)s")
     subparser.add_argument(
         '-r', '--repo',
@@ -467,13 +473,13 @@ class BuildSystemGuesser:
         # build systems, we choose the first match in this list.
         clues = [
             (r'/CMakeLists\.txt$',    'cmake'),
+            (r'/NAMESPACE$',          'r'),
             (r'/configure$',          'autotools'),
             (r'/configure\.(in|ac)$', 'autoreconf'),
             (r'/Makefile\.am$',       'autoreconf'),
             (r'/SConstruct$',         'scons'),
             (r'/waf$',                'waf'),
             (r'/setup\.py$',          'python'),
-            (r'/NAMESPACE$',          'r'),
             (r'/WORKSPACE$',          'bazel'),
             (r'/Build\.PL$',          'perlbuild'),
             (r'/Makefile\.PL$',       'perlmake'),

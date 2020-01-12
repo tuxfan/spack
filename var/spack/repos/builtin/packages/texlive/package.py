@@ -1,4 +1,4 @@
-# Copyright 2013-2019 Lawrence Livermore National Security, LLC and other
+# Copyright 2013-2020 Lawrence Livermore National Security, LLC and other
 # Spack Project Developers. See the top-level COPYRIGHT file for details.
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
@@ -47,9 +47,9 @@ class Texlive(Package):
 
     depends_on('perl', type='build')
 
-    def setup_environment(self, spack_env, run_env):
+    def setup_run_environment(self, env):
         suffix = "%s-%s" % (platform.machine(), platform.system().lower())
-        run_env.prepend_path('PATH', join_path(self.prefix.bin, suffix))
+        env.prepend_path('PATH', join_path(self.prefix.bin, suffix))
 
     def install(self, spec, prefix):
         # Using texlive's mirror system leads to mysterious problems,
